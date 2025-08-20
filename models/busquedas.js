@@ -1,22 +1,35 @@
+// models/busquedas.js
 const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
 
 class Busquedas {
   historial = [];
-  dbPath = './db/database.json';
+  // Ruta ABSOLUTA al JSON (este archivo está en /models → sube a /db/database.json)
+  dbPath = path.resolve(__dirname, '../db/database.json');
 
   constructor() {
-    //TODO: Si existe DB ? Leer DB.
-    this.leerDataHistorial();
+    this.ensureDB();          // Crea carpeta/archivo si no existen
+    this.leerDataHistorial(); // Carga historial si existe
   }
 
-  get paramsMapbox() {
+  ensureDB() {
+    const dir = path.dirname(this.dbPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(this.dbPath)) {
+      fs.writeFileSync(this.dbPath, JSON.stringify({ historial: [] }, null, 2));
+    }
+  }
+
+  // Geocodificación de OpenWeather (reemplazo de Mapbox)
+  get paramsOWMGeo() {
     return {
-      access_token: process.env.MAPBOX_KEY,
+      appid: process.env.OPENWEATHER_KEY,
       limit: 5,
-      language: 'es',
     };
   }
+
+  // Parámetros de OpenWeather para clima
   get paramspenweathermap() {
     return {
       appid: process.env.OPENWEATHER_KEY,
@@ -37,33 +50,32 @@ class Busquedas {
 
   async ciudad(search = '') {
     try {
-      // peticion http
-      const instance = axios.create({
-        baseURL: `https://api.mapbox.com/geocoding/v5/mapbox.places/${search}.json`,
-        params: this.paramsMapbox,
+      // Geocoding con OpenWeather
+      const { data } = await axios.get('https://api.openweathermap.org/geo/1.0/direct', {
+        params: { ...this.paramsOWMGeo, q: search },
+        timeout: 10000,
       });
-      const lugares = await instance.get();
-      //*
-      return lugares.data.features.map((lugar) => ({
-        id: lugar.id,
-        nombre: lugar.place_name,
-        lng: lugar.center[0],
-        lat: lugar.center[1],
+
+      return (data || []).map((lugar) => ({
+        // ID sintético para seleccionar: lat,lon
+        id: `${lugar.lat},${lugar.lon}`,
+        // Nombre amigable
+        nombre: [lugar.name, lugar.state, lugar.country].filter(Boolean).join(', '),
+        lng: lugar.lon,
+        lat: lugar.lat,
       }));
-    } catch (error) {
+    } catch {
       return [];
     }
   }
 
   async obtenerClima(lat, lon) {
     try {
-      const instance = axios.create({
-        baseURL: 'http://api.openweathermap.org/data/2.5/weather?',
+      const { data } = await axios.get('https://api.openweathermap.org/data/2.5/weather', {
         params: { ...this.paramspenweathermap, lat, lon },
+        timeout: 10000,
       });
-
-      const clima = await instance.get();
-      const { weather, main } = clima.data;
+      const { weather, main } = data;
 
       return {
         desc: weather[0].description,
@@ -77,33 +89,38 @@ class Busquedas {
   }
 
   manejarHistorial(lugar = '') {
-    //TODO:
     // prevenir duplicados
-    if (this.historial.includes(lugar.toLocaleLowerCase())) {
+    if (this.historial.includes(lugar.toLowerCase())) {
       return;
     }
-    // Limite historial
+    // Limite historial (mantén los 9 más recientes)
     this.historial = this.historial.splice(0, 9);
-    // agregar al historial
-    this.historial.unshift(lugar.toLocaleLowerCase());
-    //grabar en db
+    // agregar al inicio
+    this.historial.unshift(lugar.toLowerCase());
+    // grabar en db
     this.guardarDataHistorial();
   }
 
   guardarDataHistorial() {
-    const payload = {
-      historial: this.historial,
-    };
-    fs.writeFileSync(this.dbPath, JSON.stringify(payload));
+    this.ensureDB(); // por si borran la carpeta en caliente
+    const payload = { historial: this.historial };
+    fs.writeFileSync(this.dbPath, JSON.stringify(payload, null, 2));
   }
-  leerDataHistorial() {
-    // veificar
-    if (!fs.existsSync(this.dbPath)) return;
 
-    // leer db
-    const infojson = fs.readFileSync(this.dbPath, { encoding: 'utf-8' });
-    const data = JSON.parse(infojson);
-    this.historial = data.historial;
+  leerDataHistorial() {
+    try {
+      if (!fs.existsSync(this.dbPath)) {
+        this.historial = [];
+        return;
+      }
+      const infojson = fs.readFileSync(this.dbPath, { encoding: 'utf-8' });
+      const data = JSON.parse(infojson || '{}');
+      this.historial = Array.isArray(data.historial) ? data.historial : [];
+    } catch {
+      // Si el JSON está corrupto, no tumbes la app
+      this.historial = [];
+    }
   }
 }
+
 module.exports = Busquedas;
